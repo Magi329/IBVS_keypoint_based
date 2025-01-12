@@ -20,7 +20,7 @@ xarm文件夹放到和gogo同一个目录，用xarm官方sdk获取机械臂的�
 
 
 ## 软件的准备：
-Seg 用于从图片中分割出待抓物体。需要配置环境。文件较大，这里没有上传完整包，需从sam2官网下载
+Seg 用于从图片中分割出待抓物体。需要配置环境。文件较大，这里没有上传完整包，需从sam2和florense2官网下载
 
 Dino-vit-features 用于提取图片的关键点。需要配置环境。此包用到了Seg，运行时需修改sys.path.append。需从官网下载https://github.com/ShirAmir/dino-vit-features
 
