@@ -41,7 +41,7 @@ class Args(Node):
         self.rgb_live = None
 
         # xarm
-        #a self.arm = XArmAPI('192.168.11.11')
+        self.arm = XArmAPI('192.168.11.11')  # attention
         self.speed = 30 #50 
         self.acceleration = 30 #50 
         # camera extrinsics
@@ -109,8 +109,8 @@ class Args(Node):
             error = compute_error(points1, points2)
             print("current error is:", error)
 
-            #a live_pose = self.arm.get_position(is_radian=True)
-            live_pose = torch.tensor([0,0,0,0,0,0,0])
+            live_pose = self.arm.get_position(is_radian=True) # attention
+            
 
 ############
 ############################# 调用模型  ##################################
