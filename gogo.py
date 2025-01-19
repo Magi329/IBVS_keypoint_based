@@ -3,7 +3,6 @@ import torchvision.transforms as T
 import warnings 
 import time
 warnings.filterwarnings("ignore")
-import pyrealsense2 as rs
 import sys
 sys.path.append('./dino-vit-features')
 from correspondences import find_correspondences, draw_correspondences  
