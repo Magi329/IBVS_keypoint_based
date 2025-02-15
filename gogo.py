@@ -221,7 +221,7 @@ class Servo(Node):
 
 def main(args=None):
     # 启动节点
-    rclpy.init(args=args)
+    rclpy.init()
 
     final_pose = np.array([0.07246804319526073, 0.15627486690101278, 0.9935891484251596]) # 关闭夹爪时的位姿
     node = Servo(final_pose)                       # attention
@@ -257,6 +257,6 @@ if __name__ == '__main__':
     parser.add_argument('--model-trans', type=str, default = '/home/chen/Desktop/checkpoints/trans/0213-3/model.pth')
     parser.add_argument('--goal-image', type=str, default = 'bag_goal.jpg')
     args = parser.parse_args()
-    main()
+    main(args)
 
 
