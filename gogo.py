@@ -7,13 +7,14 @@ import sys
 sys.path.append('./dino-vit-features')
 from correspondences import find_correspondences, draw_correspondences  
 from my_utils.MODEL_v2_2 import QuaternionAlignmentTransformer, Alpha
-from my_utils.helper_functions import euler_to_quaternion, quaternion_to_euler, compute_error
+from my_utils.helper_functions import pose_euler_to_quaternion, quaternion_to_euler, compute_error
 import my_utils.quaternion_calc as qc
 from my_utils.parameters import *
 
 from xarm.wrapper import XArmAPI
 import os
 import itertools
+import argparse
 
 import rclpy
 from rclpy.node import Node
@@ -28,8 +29,8 @@ from scipy.spatial.transform import Rotation as R
 
 os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH")
 
-class Args(Node):
-    def __init__(self):
+class Servo(Node):
+    def __init__(self, final_pose):
         super().__init__('servoing_node')
         self.bridge = CvBridge()
         # realsense 
@@ -40,7 +41,7 @@ class Args(Node):
         self.rgb_live = None
 
         # xarm
-        #a self.arm = XArmAPI('192.168.11.11')
+        # self.arm = XArmAPI('192.168.11.11')  # attention
         self.speed = 30 #50 
         self.acceleration = 30 #50 
         # camera extrinsics
@@ -56,11 +57,13 @@ class Args(Node):
 
         # 加载模型
         self.model_trans = Alpha()
-        self.model_trans.load_state_dict(torch.load('/home/chen/Desktop/checkpoints/weight_test/svd_bag_1219_5_799.pth'))
+        self.model_trans.load_state_dict(torch.load(args.model_trans))
         self.model_trans.eval()
         self.model_rot = QuaternionAlignmentTransformer(hidden_dim, hidden_depth_dim, num_heads, num_layers, input_dim)
-        self.model_rot.load_state_dict(torch.load('/home/chen/Desktop/checkpoints/frozeTrans/svd_bag_1219_transformer_v2.2.pth'))
+        self.model_rot.load_state_dict(torch.load(args.model_rot))
         self.model_rot.eval()
+
+        self.final_pose = final_pose
 
         self.lock = threading.Lock()
         # servoing thread
@@ -75,6 +78,77 @@ class Args(Node):
     def calib_camera_ext(self, R):   
         return np.dot(self.R_cam2gripper, R)
     
+    @staticmethod
+    def _delta_euler_from_quat(curr_quat, goal_quat):
+        """
+        计算两个四元数之间的欧拉角差值，并解决相位跳变问题。
+
+        参数:
+        curr_quat -- 当前四元数 [x, y, z, w]
+        goal_quat -- 目标四元数 [x, y, z, w]
+
+        返回:
+        delta -- 欧拉角差值 [roll, pitch, yaw] (弧度)，仅保留最大差值维度，其余为0
+        """
+        # 将四元数转换为欧拉角
+        curr_euler = quaternion_to_euler(np.array(curr_quat))
+        goal_euler = quaternion_to_euler(np.array(goal_quat))
+
+        # 计算差值
+        delta = goal_euler - curr_euler
+
+        # 解决相位跳变问题（将差值限制在 [-pi, pi] 范围内）
+        for i in range(3):
+            if delta[i] > np.pi:
+                delta[i] -= 2 * np.pi
+            elif delta[i] < -np.pi:
+                delta[i] += 2 * np.pi
+
+        # 找到最大差值的维度
+        max_index = np.argmax(np.abs(delta))
+        max_delta = delta[max_index]
+
+        # 仅保留最大差值维度，其余维度设为0
+        delta = np.zeros_like(delta)
+        delta[max_index] = max_delta
+
+        return delta
+    
+    def pred_action(self, points1, points2, live_pose):
+        '''预测eef位姿变换'''
+        points1 = torch.tensor(list(itertools.chain(*points1)), dtype=torch.int)
+        points2 = torch.tensor(list(itertools.chain(*points2)), dtype=torch.int)
+        
+        x = torch.cat((points1, points2), dim=0).float()
+
+        # output of tanslation :
+        delta_trans = self.model_trans(x)[:3]
+        
+        # delta_trans[0] *= -0.001
+        # delta_trans[1] *= 0.001
+        # delta_trans[2] *= 0.001
+
+
+        depth = torch.norm((live_pose[:3] - torch.tensor(self.final_pose)), 
+                           dim=-1).unsqueeze(-1)
+
+        # output of rotation
+        live_pose_quat = pose_euler_to_quaternion(live_pose)
+        output_quaternion = self.model_rot(live_pose_quat.float(), 
+                                           x, 
+                                           delta_trans, 
+                                           depth.float()).detach().numpy() 
+        
+        predicted_quaternion = qc.batch_concatenate_quaternions(live_pose_quat[3:], 
+                                                                torch.tensor(output_quaternion, 
+                                                                dtype=float))
+        
+        pred_delta_pose = np.concatenate((delta_trans.detach().numpy(), 
+                                          self._delta_euler_from_quat(live_pose_quat[3:], predicted_quaternion.detach().numpy())), 
+                                          axis=0)
+        return pred_delta_pose
+
+
 
     def servoing(self):
         # visual servoing 对齐阶段
@@ -106,93 +180,62 @@ class Args(Node):
             points2 = np.array(points2).reshape(1, 2*num_pairs)
 
             error = compute_error(points1, points2)
-            print("current error is:", error)
+            print("当前误差是:", error)
 
-            #a live_pose = self.arm.get_position(is_radian=True)
-            live_pose = torch.tensor([0,0,0,0,0,0,0])
-
-############
-############################# 调用模型  ##################################
-            points1 = torch.tensor(list(itertools.chain(*points1)), dtype=torch.int)
-            points2 = torch.tensor(list(itertools.chain(*points2)), dtype=torch.int)
+            # live_pose = self.arm.get_position(is_radian=True) # attention
+            live_pose = torch.tensor([-318.34845, 476.89444, 395.504242, 1.614076, -0.791094, -1.838659])
             
-            x = torch.cat((points1, points2), dim=0).float()
-
-            # output of tanslation :
-            delta_trans = self.model_trans(x)[:3]
-            predicted_trans = live_pose[:3] + delta_trans
-            depth = torch.norm(torch.tensor([0, 0, 15.0]), dim=-1).unsqueeze(-1)   # of goal pose
-
-            # output of rotation
-            live_pose_quat = torch.tensor(euler_to_quaternion(live_pose))
-            output_quaternion = self.model_rot(live_pose_quat.to(torch.float32), x, delta_trans, depth.to(torch.float32)).detach().numpy() 
-            predicted_quaternion = qc.batch_concatenate_quaternions(torch.tensor(live_pose_quat[3:]), torch.tensor(output_quaternion, dtype=float))
-            
-            # final predicted eef pose
-            pred_pose_quat = np.concatenate((predicted_trans.detach().numpy() , predicted_quaternion), axis=0)
-            pred_pose = quaternion_to_euler(pred_pose_quat)
-            
-            if mode == 'quaternion':
-                pred_data = pred_pose_quat
-
-            elif mode == 'absolute':
-                pred_data = pred_pose
-            
-            elif mode == 'relative':
-                pred_rot = pred_pose[3:]
-                # pred_rot = (pred_rot + np.pi) % (2 * np.pi) - np.pi
-                pred_delta_pose = np.concatenate((delta_trans.detach().numpy(), pred_rot), axis=0)
-                pred_data = pred_delta_pose          
+            ## 调用模型  ##
+            pred_data = self.pred_action(points1, points2, live_pose)
+            print("pred_pos", pred_data)          
             
             
 #############
 #####################################  MOVE XARM  #####################################
-            
-            # print the predicted pose
-            print("pred_pos", pred_data) 
 
-            if pred_data[0]<-490:# 防碰桌子保护： x>-500mm
+            if live_pose[0] + pred_data[0]<-490:# 防碰桌子保护： x>-500mm
                 print("ERROR: gripper reaches the desk. STOP\n")
                 break
 
-            #a self.arm.clean_warn()
-            #a self.arm.clean_error()
+            # self.arm.clean_warn() # attention
+            # self.arm.clean_error() # attention
 
             # 移动机械臂 {相对}距离
             alpha = 0.3
 
-            # self.arm.set_servo_angle(angle=predict_poses[0], relative=True, is_radian=True, wait=True)
-            #a self.arm.set_position(x=pred_data[0]*alpha, y=pred_data[1]*alpha, z=pred_data[2]*alpha, roll=pred_data[3], pitch=pred_data[4], yaw=pred_data[5],
-            #a                      speed=self.speed, mvacc=self.acceleration, relative=False, is_radian=True, wait=True)
+
+            # self.arm.set_position(x=pred_data[0]*alpha, y=pred_data[1]*alpha, z=pred_data[2]*alpha, roll=0, pitch=0, yaw=0, # 先只测xyz的，录demo出来
+            #                      speed=self.speed, mvacc=self.acceleration, relative=True, is_radian=True, wait=True) # attention
             print("----- XARM MOVED -----")
 
             time.sleep(1)
 
         print("Error small enough, servoing ends. \n Closing gripper ... \n")
-        #a self.arm.set_gripper_position(10, speed=6000)  # 需要确定夹取宽度
-        final_pose = [-318.34845, 476.89444, 395.504242, 1.614076, -0.791094, -1.838659]
-        #a self.arm.set_position(x=final_pose[0], y=final_pose[1], z=final_pose[2], roll=[3], pitch=[4], yaw=[5],
-        #a                          speed=self.speed, mvacc=self.acceleration, relative=False, is_radian=True, wait=True)
+        # self.arm.set_gripper_position(10, speed=6000)  # 需要确定夹取宽度  # attention
+        # grasp_pose = [-318.34845, 476.89444, 395.504242, 1.614076, -0.791094, -1.838659] # attention
+        # self.arm.set_position(x=grasp_pose[0], y=grasp_pose[1], z=grasp_pose[2], roll=grasp_pose[3], pitch=grasp_pose[4], yaw=grasp_pose[5],
+        #                          speed=self.speed, mvacc=self.acceleration, relative=False, is_radian=True, wait=True) # attention
         print("----- SERVOING END -----")
-
-
 
 
 
 def main(args=None):
     # 启动节点
     rclpy.init(args=args)
-    node = Args()
-    #a node.arm.motion_enable(enable=True)
-    #a node.arm.set_mode(0)
-    #a node.arm.set_state(state=0)
-    # node.arm.set_gripper_enable(True)
-    # node.arm.set_gripper_position(850, speed=6000)
+
+    final_pose = np.array([0.07246804319526073, 0.15627486690101278, 0.9935891484251596]) # 关闭夹爪时的位姿
+    node = Servo(final_pose)                       # attention
+    # node.arm.motion_enable(enable=True) # attention
+    # node.arm.set_mode(0)                  # attention
+    # node.arm.set_state(state=0)          # attention
+
+    # node.arm.set_gripper_enable(True)  # gripper可以用的话把这个注释取消掉
+    # node.arm.set_gripper_position(850, speed=6000)# gripper可以用的话把这个注释取消掉
+    
     # 获取目标图像
-    rgb_goal = 'bag_goal.jpg'
-    node.rgb_goal = rgb_goal
+    node.rgb_goal = args.goal_image
     print("Goal image loaded\n")
-    rgb_live = 'bag_live.jpg'
+    rgb_live = 'bag_live.jpg' # attention
     node.rgb_live = rgb_live
 
 
@@ -209,6 +252,11 @@ def main(args=None):
         rclpy.shutdown()
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="model checkpoint inference")
+    parser.add_argument('--model-rot', type=str, default = '/home/chen/Desktop/checkpoints/rot/0210-7/model.pth')
+    parser.add_argument('--model-trans', type=str, default = '/home/chen/Desktop/checkpoints/trans/0213-3/model.pth')
+    parser.add_argument('--goal-image', type=str, default = 'bag_goal.jpg')
+    args = parser.parse_args()
     main()
 
 
